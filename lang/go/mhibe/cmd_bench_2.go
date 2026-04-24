@@ -229,6 +229,9 @@ func main() {
 			X = append(X, fr)
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		panic(err)
+	}
 	fmt.Printf("[*] Loaded %d real TPC-H records.\n", len(dbData))
 	fmt.Printf("[*] Query matched %d real records.\n", len(I))
 
@@ -314,7 +317,7 @@ func main() {
 
 	if isComplete {
 		fmt.Printf("[+] Client Geometric Check Time: %.4f ms (SUCCESS! Exact space match!)\n", clientCheckMs)
-		fmt.Printf("    -> [Detail] 2335 rows collapsed into %d unique spatial points.\n", realSpatialVolume)
+		fmt.Printf("    -> [Detail] %d matching rows collapsed into %d unique spatial points.\n", len(I), realSpatialVolume)
 	} else {
 		fmt.Printf("[-] Client Geometric Check: FAILED! (Empty: %d, Unique Real: %d, Target: %d)\n", emptyVolume, realSpatialVolume, totalQueryVolume)
 	}

@@ -12,9 +12,6 @@ import (
 	"strings"
 	"time"
 
-	// M-HIBE 依赖
-	"github.com/ucbrise/jedi-pairing/lang/go/wkdibe"
-
 	// 零知识累加器依赖
 	"github.com/accumulators-agg/bp/bpacc"
 	"github.com/accumulators-agg/go-poly/fft"
@@ -179,18 +176,15 @@ func ParseDate(dateStr string) int64 {
 }
 
 // ==========================================
-// ZK-Accumulator
+// Pure ZK-Accumulator Benchmark
 // ==========================================
 func main() {
-	fmt.Println("[*] Starting Uncompromised VDB Benchmark (Ablation Study)...")
+	fmt.Println("[*] Starting Pure ZK-Accumulator Completeness/Correctness Benchmark...")
 
 	// ========================================================
-	// 0. 全局初始化 (M-HIBE & BLS12-381)
+	// 0. 全局初始化 (BLS12-381 + ZK Accumulator)
 	// ========================================================
 	mcl.InitFromString("bls12-381")
-
-	params, masterKey := wkdibe.Setup(36, true)
-	_, _ = params, masterKey
 
 	var acc bpacc.BpAcc
 	keyDir := "./pkvk-17"
@@ -240,11 +234,16 @@ func main() {
 			X = append(X, fr)
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		panic(err)
+	}
+	fmt.Printf("[*] Loaded %d real TPC-H records, query hit %d rows.\n", len(dbData), len(I))
 
+	// 全量数据库承诺 + 查询外补集承诺
 	digest_DB, _ := acc.CommitFakeG1(dbFr)
 	digest_X, _ := acc.CommitFakeG1(X)
 
-	// --- 提取空前缀 (无论哪种方案，提取空隙的这一步都是必须的) ---
+	// --- 提取空前缀（后续用于非成员证明）---
 	extractionStart := time.Now()
 	initialPrefixes := MapToIDs(query)
 	var initialPatterns []string
@@ -259,19 +258,9 @@ func main() {
 	extractionMs := float64(time.Since(extractionStart).Nanoseconds()) / 1e6
 
 	// ========================================================
-	// [测试 1]: 你提出的架构 (M-HIBE + ZK-Mem)
+	// [Proof A] 正确性：查询结果成员证明 (I ⊆ DB 且与 X 互补)
 	// ========================================================
-	fmt.Println("\n=== TEST 1: PROPOSED DUAL-ENGINE ARCHITECTURE ===")
-
-	// 引擎 A: M-HIBE 密钥生成 (完整性/权限)
-	cryptoStart := time.Now()
-	for _, pattern := range combinedEmptyPatterns {
-		time.Sleep(500 * time.Microsecond) // 模拟 0.5ms WKD-IBE 密钥生成
-		_ = pattern
-	}
-	mhibeCryptoMs := float64(time.Since(cryptoStart).Nanoseconds()) / 1e6
-
-	// 引擎 B: ZK 成员证明 (真实性)
+	fmt.Println("\n=== PROOF A: ZK-Membership (Correctness of returned rows) ===")
 	zkMemStart := time.Now()
 	var transcriptMem [32]byte
 	var randMem mcl.Fr
@@ -282,23 +271,22 @@ func main() {
 	zkDegProof := acc.ZKDegCheckProver(C_I, I_poly, zkMemProof.HashProof(transcriptMem))
 	zkMemProverMs := float64(time.Since(zkMemStart).Nanoseconds()) / 1e6
 
-	// 加上这两行打印体积，变量就算“被使用”了，就不会报错了
 	zkMemSize := float64(zkMemProof.ByteSize()) / 1024.0
 	zkDegSize := float64(zkDegProof.ByteSize()) / 1024.0
-	fmt.Printf("[+] ZK Proof Size: %.2f KB\n", zkMemSize+zkDegSize)
-
-	fmt.Printf("[+] Proposed Prover Time: %.2f ms (M-HIBE) + %.2f ms (ZK-Mem) = %.2f ms\n",
-		extractionMs+mhibeCryptoMs, zkMemProverMs, extractionMs+mhibeCryptoMs+zkMemProverMs)
+	memVerifyStart := time.Now()
+	memOK1 := acc.ZKMemVerifier(zkMemProof, digest_DB, C_I.Com, transcriptMem)
+	memOK2 := acc.ZKDegCheckVerifier(C_I.Com, zkDegProof, zkMemProof.HashProof(transcriptMem))
+	memVerifyMs := float64(time.Since(memVerifyStart).Nanoseconds()) / 1e6
 
 	// ========================================================
-	// [测试 2]: 纯零知识累加器基线 (Pure ZK-Accumulator Baseline)
+	// [Proof B] 完备性：空区域非成员证明 (E ∩ DB = ∅)
 	// ========================================================
-	fmt.Println("\n=== TEST 2: PURE ZK-ACCUMULATOR BASELINE (Mem + Non-Mem) ===")
+	fmt.Println("\n=== PROOF B: ZK-NonMembership (Completeness of empty regions) ===")
 
-	// 准备空区域的 Fr 集合
-	var I_empty []mcl.Fr
+	// 准备空区域元素集合 E
+	var emptySet []mcl.Fr
 	for _, pattern := range combinedEmptyPatterns {
-		I_empty = append(I_empty, bpacc.SeedToFr(pattern))
+		emptySet = append(emptySet, bpacc.SeedToFr(pattern))
 	}
 
 	zkNonMemStart := time.Now()
@@ -308,29 +296,27 @@ func main() {
 	var randNonMem mcl.Fr
 	randNonMem.Random()
 
-	// 核心: 针对全库 dbFr 和空前缀 I_empty 生成非成员证明 A, B
-	A, B := acc.ProveBatchNonMemFake(dbFr, I_empty)
+	// 针对全库 dbFr 和空集合 emptySet 生成批量非成员证明
+	A, B := acc.ProveBatchNonMemFake(dbFr, emptySet)
 
-	// 构建多项式与承诺 (这一步针对 1.2万个元素会比较耗时)
-	I_empty_poly := fft.PolyTree(I_empty)
-	C_I_empty := bpacc.PedG2{Com: acc.PedersenG2(I_empty_poly, acc.VK, randNonMem, acc.PedVK[0]), R: randNonMem}
+	// 构建空集合多项式承诺
+	emptyPoly := fft.PolyTree(emptySet)
+	CEmpty := bpacc.PedG2{Com: acc.PedersenG2(emptyPoly, acc.VK, randNonMem, acc.PedVK[0]), R: randNonMem}
 
-	// Prover: 生成零知识非成员证明 + 度数检查
-	zkNonMemProof := acc.ZKNonMemProver(digest_DB, C_I_empty, A, B, transcriptNonMem)
-	zkDegNonMemProof := acc.ZKDegCheckProver(C_I_empty, I_empty_poly, zkNonMemProof.HashProof(transcriptNonMem))
+	zkNonMemProof := acc.ZKNonMemProver(digest_DB, CEmpty, A, B, transcriptNonMem)
+	zkDegNonMemProof := acc.ZKDegCheckProver(CEmpty, emptyPoly, zkNonMemProof.HashProof(transcriptNonMem))
 
 	zkNonMemProverMs := float64(time.Since(zkNonMemStart).Nanoseconds()) / 1e6
-
-	fmt.Printf("[+] Pure ZK Prover Time: %.2f ms (ZK-NonMem) + %.2f ms (ZK-Mem) = %.2f ms\n",
-		extractionMs+zkNonMemProverMs, zkMemProverMs, extractionMs+zkNonMemProverMs+zkMemProverMs)
-
-	// 验证 Pure ZK 架构的客户端正确性
 	zkNonMemVerifyStart := time.Now()
-	ok1 := acc.ZKNonMemVerifier(zkNonMemProof, digest_DB, C_I_empty.Com, transcriptNonMem)
-	ok2 := acc.ZKDegCheckVerifier(C_I_empty.Com, zkDegNonMemProof, zkNonMemProof.HashProof(transcriptNonMem))
+	nonMemOK1 := acc.ZKNonMemVerifier(zkNonMemProof, digest_DB, CEmpty.Com, transcriptNonMem)
+	nonMemOK2 := acc.ZKDegCheckVerifier(CEmpty.Com, zkDegNonMemProof, zkNonMemProof.HashProof(transcriptNonMem))
 	zkNonMemVerifyMs := float64(time.Since(zkNonMemVerifyStart).Nanoseconds()) / 1e6
 
-	if ok1 && ok2 {
-		fmt.Printf("[+] Pure ZK Verifier Time: %.2f ms (SUCCESS!)\n", zkNonMemVerifyMs)
-	}
+	nonMemSize := float64(zkNonMemProof.ByteSize()+zkDegNonMemProof.ByteSize()) / 1024.0
+
+	fmt.Println("\n=== FINAL PURE ZK REPORT ===")
+	fmt.Printf("Empty-prefix extraction time: %.2f ms\n", extractionMs)
+	fmt.Printf("Membership proof: %.2f ms prover / %.2f ms verifier, size %.2f KB, ok=%v\n", zkMemProverMs, memVerifyMs, zkMemSize+zkDegSize, memOK1 && memOK2)
+	fmt.Printf("Non-membership proof: %.2f ms prover / %.2f ms verifier, size %.2f KB, ok=%v\n", zkNonMemProverMs, zkNonMemVerifyMs, nonMemSize, nonMemOK1 && nonMemOK2)
+	fmt.Printf("Overall (completeness && correctness): %v\n", (memOK1 && memOK2) && (nonMemOK1 && nonMemOK2))
 }
