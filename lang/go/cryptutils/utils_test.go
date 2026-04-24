@@ -41,25 +41,41 @@ import (
 )
 
 func TestHashToZp(t *testing.T) {
-	hashes := []*big.Int{}
-	for i := 0; i != 1000; i++ {
-		buffer := make([]byte, 128)
-		if _, err := rand.Read(buffer); err != nil {
-			t.Fatal(err)
+	t.Run("edge cases are deterministic and in range", func(t *testing.T) {
+		cases := [][]byte{
+			{},
+			[]byte("a"),
+			make([]byte, 128),
 		}
-		a := HashToZp(new(big.Int), buffer)
-		b := HashToZp(new(big.Int), buffer)
-		if a.Cmp(b) != 0 {
-			t.Fatal("Hash is not deterministic")
-		}
-		for _, hash := range hashes {
-			if a.Cmp(hash) == 0 {
-				t.Fatal("Hash is not collision-resistant")
+
+		for _, input := range cases {
+			a := HashToZp(new(big.Int), input)
+			b := HashToZp(new(big.Int), input)
+			if a.Cmp(b) != 0 {
+				t.Fatalf("hash is not deterministic for input %q", input)
+			}
+			if a.Sign() == -1 || a.Cmp(bls12381.GroupOrder) != -1 {
+				t.Fatalf("hash is outside of the valid range for input %q", input)
 			}
 		}
-		if a.Sign() == -1 || a.Cmp(bls12381.GroupOrder) != -1 {
-			t.Fatal("Hash is outside of the valid range")
+	})
+
+	t.Run("random inputs do not collide in sample", func(t *testing.T) {
+		seen := make(map[string]struct{}, 1000)
+		for i := 0; i != 1000; i++ {
+			buffer := make([]byte, 128)
+			if _, err := rand.Read(buffer); err != nil {
+				t.Fatal(err)
+			}
+			a := HashToZp(new(big.Int), buffer)
+			encoded := string(a.FillBytes(make([]byte, 32)))
+			if _, ok := seen[encoded]; ok {
+				t.Fatal("hash is not collision-resistant")
+			}
+			seen[encoded] = struct{}{}
+			if a.Sign() == -1 || a.Cmp(bls12381.GroupOrder) != -1 {
+				t.Fatal("hash is outside of the valid range")
+			}
 		}
-		hashes = append(hashes, a)
-	}
+	})
 }
