@@ -90,7 +90,7 @@ func (m *Encryptable) Unmarshal(marshalled []byte) bool {
 // HashToSymmetricKey hashes the encryptable to get a symmetric key. The
 // symmetric key fills the provided slice (which can be of any length, but
 // remember that there are only 32 bytes of entropy in the underlying group
-// element). Returns sthe provided slice.
+// element). Returns the provided slice.
 func (m *Encryptable) HashToSymmetricKey(sk []byte) []byte {
 	shake := sha3.NewShake256()
 	shake.Write(m.Bytes())
@@ -116,7 +116,7 @@ type Signable struct {
 }
 
 // Hash assigns the value of this Signable to a cryptographic hash of the
-// provided data. The cryptographic hash used is sha256.
+// provided data. The cryptographic hash used is SHAKE256 (Keccak).
 func (m *Signable) Hash(data []byte) *Signable {
 	var hash [C.sizeof_embedded_pairing_core_bigint_256_t]byte
 
